@@ -10,40 +10,35 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Loglarni sozlash
+# Log sozlash
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# .env faylini yuklash
 load_dotenv()
 
-# Telegram va Bitget sozlamalari
+# O'zgaruvchilarni yuklash
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITGET_API_KEY = os.getenv("BITGET_API_KEY")
 BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
-
-# Faqat sizga ruxsat berilgan bo'lsin
 AUTHORIZED_USER_ID = os.getenv("AUTHORIZED_USER_ID")
 
-# ID ni tekshirish va int ga aylantirish
+# ID ni tekshirish
 try:
     AUTHORIZED_USER_ID = int(AUTHORIZED_USER_ID) if AUTHORIZED_USER_ID else None
-except (ValueError, TypeError):
+except:
     AUTHORIZED_USER_ID = None
 
 BASE_URL = "https://api.bitget.com"
 
-# Foydalanuvchi ruxsati
 def is_authorized(update: Update) -> bool:
     if AUTHORIZED_USER_ID is None:
-        return True  # Agar AUTHORIZED_USER_ID yo'q bo'lsa, hamma uchun ochiq
+        return True
     return update.effective_user.id == AUTHORIZED_USER_ID
 
-# Bitget API so'rovini imzolash
 def sign_request(timestamp: str, method: str, path: str, query_string: str = "", body: str = "") -> str:
     pre_hash = timestamp + method.upper() + path
     if query_string:
@@ -57,7 +52,6 @@ def sign_request(timestamp: str, method: str, path: str, query_string: str = "",
     ).digest()
     return base64.b64encode(signature).decode('utf-8')
 
-# Umumiy Bitget API so'rovi
 def bitget_request(method: str, path: str, params=None, body=None) -> dict:
     timestamp = str(int(time.time() * 1000))
     query_string = ""
@@ -87,94 +81,75 @@ def bitget_request(method: str, path: str, params=None, body=None) -> dict:
     
     try:
         return response.json()
-    except json.JSONDecodeError:
-        return {"code": "99999", "msg": "Javob JSON formatida emas"}
+    except:
+        return {"code": "99999", "msg": "Javob JSON emas"}
 
-# /start
+# Komandalar
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         await update.message.reply_text("⚠️ Sizga ruxsat yo‘q!")
         return
-    await update.message.reply_text(
-        "✅ Salom! Men Bitget orqali kriptovalyuta sotib olish/sotish botiman.\n\n"
-        "Foydalanish:\n"
-        "/buy BTC 0.001\n"
-        "/sell ETH 0.1\n\n"
-        "Diqqat: Summa — USDT bozorida miqdor (masalan, BTC miqdori)."
-    )
+    await update.message.reply_text("✅ Salom! Foydalanish: /buy BTC 0.001 yoki /sell ETH 0.1")
 
-# /buy
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         await update.message.reply_text("⚠️ Sizga ruxsat yo‘q!")
         return
     try:
         if len(context.args) != 2:
-            await update.message.reply_text("UsageId: /buy <symbol> <miqdor>\nMisol: /buy BTC 0.001")
+            await update.message.reply_text("UsageId: /buy <symbol> <miqdor>")
             return
-        symbol = context.args[0].upper().replace("USDT", "")
+        symbol = context.args[0].upper().replace("USDT", "") + "USDT"
         size = context.args[1]
-        full_symbol = symbol + "USDT"
-
-        order_data = {
-            "symbol": full_symbol,
+        res = bitget_request("POST", "/api/spot/v1/trade/orders", body={
+            "symbol": symbol,
             "side": "buy",
             "orderType": "market",
             "size": size
-        }
-        res = bitget_request("POST", "/api/spot/v1/trade/orders", body=order_data)
+        })
         if res.get("code") == "00000":
-            await update.message.reply_text(f"✅ Sotib olish bajarildi!\nSymbol: {full_symbol}\nMiqdor: {size}")
+            await update.message.reply_text(f"✅ Sotib olish bajarildi!\n{symbol} — {size}")
         else:
-            await update.message.reply_text(f"❌ Xatolik: {res.get('msg', 'Noma’lum xato')}")
+            await update.message.reply_text(f"❌ Xatolik: {res.get('msg', 'Noma’lum')}")
     except Exception as e:
-        logger.error(f"Xatolik /buy da: {e}")
+        logger.error(f"Xato: {e}")
         await update.message.reply_text(f"⚠️ Xatolik: {str(e)}")
 
-# /sell
 async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         await update.message.reply_text("⚠️ Sizga ruxsat yo‘q!")
         return
     try:
         if len(context.args) != 2:
-            await update.message.reply_text("UsageId: /sell <symbol> <miqdor>\nMisol: /sell BTC 0.001")
+            await update.message.reply_text("UsageId: /sell <symbol> <miqdor>")
             return
-        symbol = context.args[0].upper().replace("USDT", "")
+        symbol = context.args[0].upper().replace("USDT", "") + "USDT"
         size = context.args[1]
-        full_symbol = symbol + "USDT"
-
-        order_data = {
-            "symbol": full_symbol,
+        res = bitget_request("POST", "/api/spot/v1/trade/orders", body={
+            "symbol": symbol,
             "side": "sell",
             "orderType": "market",
             "size": size
-        }
-        res = bitget_request("POST", "/api/spot/v1/trade/orders", body=order_data)
+        })
         if res.get("code") == "00000":
-            await update.message.reply_text(f"✅ Sotish bajarildi!\nSymbol: {full_symbol}\nMiqdor: {size}")
+            await update.message.reply_text(f"✅ Sotish bajarildi!\n{symbol} — {size}")
         else:
-            await update.message.reply_text(f"❌ Xatolik: {res.get('msg', 'Noma’lum xato')}")
+            await update.message.reply_text(f"❌ Xatolik: {res.get('msg', 'Noma’lum')}")
     except Exception as e:
-        logger.error(f"Xatolik /sell da: {e}")
+        logger.error(f"Xato: {e}")
         await update.message.reply_text(f"⚠️ Xatolik: {str(e)}")
 
-# Asosiy
+# Ishga tushirish
 if __name__ == "__main__":
-    # Majburiy o'zgaruvchilarni tekshirish
-    required_vars = ["TELEGRAM_BOT_TOKEN", "BITGET_API_KEY", "BITGET_SECRET_KEY", "BITGET_PASSPHRASE"]
-    missing = [var for var in required_vars if not os.getenv(var)]
+    required = ["TELEGRAM_BOT_TOKEN", "BITGET_API_KEY", "BITGET_SECRET_KEY", "BITGET_PASSPHRASE"]
+    missing = [v for v in required if not os.getenv(v)]
     if missing:
-        logger.error(f"❌ .env faylida quyidagi majburiy o'zgaruvchilar yo'q: {', '.join(missing)}")
+        logger.error(f"Xatolik: .env da yo'q: {', '.join(missing)}")
         exit(1)
-    
-    if AUTHORIZED_USER_ID is None:
-        logger.warning("⚠️ AUTHORIZED_USER_ID sozlanmagan — bot hamma uchun ochiq!")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buy", buy))
     app.add_handler(CommandHandler("sell", sell))
-    
     logger.info("🚀 Bot ishga tushdi...")
     app.run_polling()
