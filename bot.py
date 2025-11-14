@@ -5,9 +5,17 @@ import time
 import base64
 import json
 import requests
+import logging
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+# Loglarni sozlash
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # .env faylini yuklash
 load_dotenv()
@@ -18,13 +26,21 @@ BITGET_API_KEY = os.getenv("BITGET_API_KEY")
 BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
 BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 
-# Faqat sizga ruxsat berilgan bo'lsin (Telegram ID'ingizni quyidagi bot orqali oling: https://t.me/userinfobot)
-AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
+# Faqat sizga ruxsat berilgan bo'lsin
+AUTHORIZED_USER_ID = os.getenv("AUTHORIZED_USER_ID")
+
+# ID ni tekshirish va int ga aylantirish
+try:
+    AUTHORIZED_USER_ID = int(AUTHORIZED_USER_ID) if AUTHORIZED_USER_ID else None
+except (ValueError, TypeError):
+    AUTHORIZED_USER_ID = None
 
 BASE_URL = "https://api.bitget.com"
 
 # Foydalanuvchi ruxsati
 def is_authorized(update: Update) -> bool:
+    if AUTHORIZED_USER_ID is None:
+        return True  # Agar AUTHORIZED_USER_ID yo'q bo'lsa, hamma uchun ochiq
     return update.effective_user.id == AUTHORIZED_USER_ID
 
 # Bitget API so'rovini imzolash
@@ -96,7 +112,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.args) != 2:
             await update.message.reply_text("UsageId: /buy <symbol> <miqdor>\nMisol: /buy BTC 0.001")
             return
-        symbol = context.args[0].upper().replace("USDT", "")  # BTCUSDT → BTC (xavfsiz kengaytirish)
+        symbol = context.args[0].upper().replace("USDT", "")
         size = context.args[1]
         full_symbol = symbol + "USDT"
 
@@ -112,6 +128,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❌ Xatolik: {res.get('msg', 'Noma’lum xato')}")
     except Exception as e:
+        logger.error(f"Xatolik /buy da: {e}")
         await update.message.reply_text(f"⚠️ Xatolik: {str(e)}")
 
 # /sell
@@ -139,19 +156,25 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❌ Xatolik: {res.get('msg', 'Noma’lum xato')}")
     except Exception as e:
+        logger.error(f"Xatolik /sell da: {e}")
         await update.message.reply_text(f"⚠️ Xatolik: {str(e)}")
 
 # Asosiy
 if __name__ == "__main__":
-    if not TELEGRAM_TOKEN or not BITGET_API_KEY or not BITGET_SECRET_KEY or not BITGET_PASSPHRASE:
-        print("❌ Xatolik: .env faylida barcha kalitlar to'ldirilmagan!")
+    # Majburiy o'zgaruvchilarni tekshirish
+    required_vars = ["TELEGRAM_BOT_TOKEN", "BITGET_API_KEY", "BITGET_SECRET_KEY", "BITGET_PASSPHRASE"]
+    missing = [var for var in required_vars if not os.getenv(var)]
+    if missing:
+        logger.error(f"❌ .env faylida quyidagi majburiy o'zgaruvchilar yo'q: {', '.join(missing)}")
         exit(1)
-    if AUTHORIZED_USER_ID == 0:
-        print("⚠️ DIQQAT: AUTHORIZED_USER_ID sozlanmagan — bot hamma uchun ochiq!")
     
+    if AUTHORIZED_USER_ID is None:
+        logger.warning("⚠️ AUTHORIZED_USER_ID sozlanmagan — bot hamma uchun ochiq!")
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buy", buy))
     app.add_handler(CommandHandler("sell", sell))
-    print("🚀 Bot ishga tushdi...")
+    
+    logger.info("🚀 Bot ishga tushdi...")
     app.run_polling()
