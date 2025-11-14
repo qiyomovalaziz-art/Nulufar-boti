@@ -1,188 +1,75 @@
-import os
-import json
-from datetime import datetime
-import matplotlib.pyplot as plt
-from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
-)
-from openai import OpenAI
+import logging
+import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# 🔐 .env dan yuklash
-load_dotenv()
+# 🔑 Bot tokeningizni qo'ying
+BOT_TOKEN = "SIZNING_BOT_TOKENINGIZ"
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))  # Sizning Telegram ID’ingiz
+# ExchangeRate API (bepul, ro'yxatdan o'tish shart emas)
+EXCHANGE_API_URL = "https://api.exchangerate-api.com/v4/latest/{}"
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Logging sozlamalari
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-USERS_FILE = "users.json"
-
-
-# 🔄 JSON bilan ishlash
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-
-def save_users(users):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
-
-
-# ✅ /start komandasi
+# /start buyrug'i
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_name = user.first_name
-    user_id = user.id
-
-    users = load_users()
-
-    # Yangi foydalanuvchini qo‘shish
-    if str(user_id) not in users:
-        users[str(user_id)] = {
-            "name": user_name,
-            "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        save_users(users)
-
-        # 🔔 Admin'ga xabar yuborish
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"🆕 Yangi foydalanuvchi kirdi!\n👤 Ism: {user_name}\n🆔 ID: {user_id}"
-        )
-
     await update.message.reply_text(
-        f"Assalomu alaykum, {user_name}! 🤖\n"
-        "Nulufarxon😍 Botga xush kelibsiz!\n"
-        "Savol yozing yoki rasm yuboring — men yordam beraman ✍️📸"
+        "Salom! Men valyuta almashish botiman.\n\n"
+        "Misol: `100 USD to UZS` yoki `50 EUR to USD`\n"
+        "Yordam uchun /help buyrug'idan foydalaning."
     )
 
-
-# ✅ Matnga javob berish
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_msg = update.message.text
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Sen foydalanuvchiga yordam beradigan aqlli yordamchi botsan."},
-            {"role": "user", "content": user_msg}
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Sen rasmlarni tahlil qilib tushuntirib beradigan yordamchisan."},
-            {"role": "user", "content": [
-                {"type": "text", "text": "Rasimda nimalar borligini tushuntirib bering."},
-                {"type": "image_url", "image_url": {"url": image_url}}
-            ]}
-        ]
+# /help buyrug'i
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Format:\n<miqdor> <valyuta1> to <valyuta2>\n\n"
+        "Misol:\n100 USD to UZS\n50 EUR to RUB\n\n"
+        "Qo'llab-quvvatlanadigan valyutalar: USD, EUR, RUB, UZS, GBP, JPY, KZT va boshqalar."
     )
 
-    answer = response.choices[0].message.content
-    await update.message.reply_text(answer)
+# Xabarlarni qayta ishlash
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().upper()
+    try:
+        # Format: "100 USD TO UZS"
+        if " TO " not in text:
+            raise ValueError("Noto'g'ri format. '100 USD to UZS' kabi yozing.")
 
+        amount_part, to_part = text.split(" TO ")
+        amount = float(amount_part.split()[0])
+        from_currency = amount_part.split()[1]
+        to_currency = to_part.strip()
 
-# 🧑‍💼 /admin komandasi — tugmalar bilan
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ Sizda bu buyruqdan foydalanish huquqi yo‘q.")
-        return
+        # API orqali kursni olish
+        response = requests.get(EXCHANGE_API_URL.format(from_currency))
+        if response.status_code != 200:
+            raise ValueError("Valyuta topilmadi yoki xatolik yuz berdi.")
 
-    keyboard = [
-        [InlineKeyboardButton("📋 Foydalanuvchilar ro‘yxati", callback_data="show_users")],
-        [InlineKeyboardButton("📈 Statistikani ko‘rish", callback_data="show_stats")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+        data = response.json()
+        rates = data.get("rates", {})
 
-    await update.message.reply_text("🧑‍💼 Admin panelga xush kelibsiz:", reply_markup=reply_markup)
+        if to_currency not in rates:
+            raise ValueError(f"{to_currency} valyutasi qo'llab-quvvatlanmaydi.")
 
+        converted = amount * rates[to_currency]
+        result = f"{amount:,.2f} {from_currency} = {converted:,.2f} {to_currency}"
+        await update.message.reply_text(result)
 
-# 📋 Tugma: foydalanuvchilar ro‘yxatini ko‘rsatish
-async def show_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    except Exception as e:
+        await update.message.reply_text(f"Xatolik: {str(e)}\nYordam uchun /help")
 
-    users = load_users()
-    total = len(users)
-
-    if total == 0:
-        await query.edit_message_text("👥 Hozircha hech kim botga kirmagan.")
-        return
-
-    text = f"📊 <b>Foydalanuvchilar ro‘yxati</b>\n\n"
-    for i, (uid, info) in enumerate(users.items(), 1):
-        text += f"{i}. {info['name']} — {info['joined_at']}\n"
-
-    text += f"\n<b>Jami:</b> {total} ta foydalanuvchi 👥"
-    await query.edit_message_text(text, parse_mode="HTML")
-
-
-# 📈 Tugma: statistikani ko‘rsatish
-async def show_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    users = load_users()
-    if not users:
-        await query.edit_message_text("📉 Hali hech kim botga kirmagan.")
-        return
-
-    # Sana bo‘yicha sanash
-    dates = [datetime.strptime(u["joined_at"], "%Y-%m-%d %H:%M:%S").date() for u in users.values()]
-    dates.sort()
-
-    counts = {}
-    for d in dates:
-        counts[d] = counts.get(d, 0) + 1
-
-    x = list(counts.keys())
-    y = []
-    total = 0
-    for d in x:
-        total += counts[d]
-        y.append(total)
-
-    plt.figure()
-    plt.plot(x, y, marker="o")
-    plt.title("📈 Bot foydalanuvchilari soni o‘sishi")
-    plt.xlabel("Sana")
-    plt.ylabel("Jami foydalanuvchilar")
-    plt.grid(True)
-
-    img_path = "stats.png"
-    plt.savefig(img_path)
-    plt.close()
-
-    await context.bot.send_photo(chat_id=ADMIN_ID, photo=open(img_path, "rb"))
-
-
-# ✅ Asosiy ishga tushirish
+# Asosiy funksiya
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    # Komandalar
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Tugma bosilishi
-    app.add_handler(CallbackQueryHandler(show_users_callback, pattern="show_users"))
-    app.add_handler(CallbackQueryHandler(show_stats_callback, pattern="show_stats"))
-
-    # Xabarlar
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
-    print("🤖 Bot ishga tushdi...")
-    app.run_polling()
-
+    logger.info("Bot ishga tushdi...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
