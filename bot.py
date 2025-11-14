@@ -1,7 +1,6 @@
 import os
 import sqlite3
 import requests
-import asyncio
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
@@ -13,7 +12,18 @@ import logging
 load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_ID_STR = os.getenv("7973934849")
+
+if not BOT_TOKEN:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN muhim! .env fayliga token kiriting.")
+
+if not ADMIN_ID_STR:
+    raise ValueError("❌ ADMIN_ID muhim! .env fayliga admin ID kiriting.")
+
+try:
+    ADMIN_ID = int(ADMIN_ID_STR)
+except ValueError:
+    raise ValueError(f"❌ ADMIN_ID raqam bo'lishi kerak. Hozirgi qiymat: {ADMIN_ID_STR}")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
