@@ -1,75 +1,123 @@
-import logging
+import os
+import hmac
+import hashlib
+import time
+import base64
+import json
 import requests
+from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# 🔑 Bot tokeningizni qo'ying
-BOT_TOKEN = "SIZNING_BOT_TOKENINGIZ"
+load_dotenv()
 
-# ExchangeRate API (bepul, ro'yxatdan o'tish shart emas)
-EXCHANGE_API_URL = "https://api.exchangerate-api.com/v4/latest/{}"
+# API sozlamalari
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+API_KEY = os.getenv("BITGET_API_KEY")
+SECRET_KEY = os.getenv("BITGET_SECRET_KEY")
+PASSPHRASE = os.getenv("BITGET_PASSPHRASE")
 
-# Logging sozlamalari
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+BASE_URL = "https://api.bitget.com"
 
-# /start buyrug'i
+# Bitget API uchun so'rov yuborish funksiyasi
+def sign_request(timestamp, method, path, query_string="", body=""):
+    pre_hash = timestamp + method.upper() + path
+    if query_string:
+        pre_hash += "?" + query_string
+    if body:
+        pre_hash += body
+    signature = hmac.new(
+        SECRET_KEY.encode('utf-8'),
+        pre_hash.encode('utf-8'),
+        hashlib.sha256
+    ).digest()
+    return base64.b64encode(signature).decode('utf-8')
+
+def bitget_request(method, path, params=None, body=None):
+    timestamp = str(int(time.time() * 1000))
+    query_string = ""
+    body_str = json.dumps(body) if body else ""
+    
+    if method.upper() == "GET" and params:
+        from urllib.parse import urlencode
+        query_string = urlencode(params)
+    
+    signature = sign_request(timestamp, method, path, query_string, body_str)
+    
+    headers = {
+        "ACCESS-KEY": API_KEY,
+        "ACCESS-SIGN": signature,
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": PASSPHRASE,
+        "Content-Type": "application/json"
+    }
+    
+    url = BASE_URL + path
+    if method.upper() == "GET":
+        if query_string:
+            url += "?" + query_string
+        response = requests.get(url, headers=headers)
+    else:
+        response = requests.post(url, headers=headers, data=body_str)
+    
+    return response.json()
+
+# /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Salom! Men valyuta almashish botiman.\n\n"
-        "Misol: `100 USD to UZS` yoki `50 EUR to USD`\n"
-        "Yordam uchun /help buyrug'idan foydalaning."
-    )
+    await update.message.reply_text("Salom! Men Bitget orqali kriptovalyuta sotib olish/sotish botiman.\nFoydalanish: /buy BTC 0.001 yoki /sell ETH 0.1")
 
-# /help buyrug'i
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Format:\n<miqdor> <valyuta1> to <valyuta2>\n\n"
-        "Misol:\n100 USD to UZS\n50 EUR to RUB\n\n"
-        "Qo'llab-quvvatlanadigan valyutalar: USD, EUR, RUB, UZS, GBP, JPY, KZT va boshqalar."
-    )
-
-# Xabarlarni qayta ishlash
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().upper()
+# /buy
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Format: "100 USD TO UZS"
-        if " TO " not in text:
-            raise ValueError("Noto'g'ri format. '100 USD to UZS' kabi yozing.")
-
-        amount_part, to_part = text.split(" TO ")
-        amount = float(amount_part.split()[0])
-        from_currency = amount_part.split()[1]
-        to_currency = to_part.strip()
-
-        # API orqali kursni olish
-        response = requests.get(EXCHANGE_API_URL.format(from_currency))
-        if response.status_code != 200:
-            raise ValueError("Valyuta topilmadi yoki xatolik yuz berdi.")
-
-        data = response.json()
-        rates = data.get("rates", {})
-
-        if to_currency not in rates:
-            raise ValueError(f"{to_currency} valyutasi qo'llab-quvvatlanmaydi.")
-
-        converted = amount * rates[to_currency]
-        result = f"{amount:,.2f} {from_currency} = {converted:,.2f} {to_currency}"
-        await update.message.reply_text(result)
-
+        symbol = context.args[0].upper()
+        size = context.args[1]
+        # SPOT bozori uchun `symbol` formati `BTCUSDT`
+        # Agar foydalanuvchi faqat `BTC` bersa, `USDT` qo'shamiz (yoki boshqa quote)
+        if "USD" not in symbol and "USDT" not in symbol:
+            symbol += "USDT"
+        
+        # Order yuborish
+        order_data = {
+            "symbol": symbol,
+            "side": "buy",
+            "orderType": "market",
+            "size": size
+        }
+        res = bitget_request("POST", "/api/spot/v1/trade/orders", body=order_data)
+        if res.get("code") == "00000":
+            await update.message.reply_text(f"✅ Sotib olish bajarildi!\nSymbol: {symbol}\nMiqdor: {size}")
+        else:
+            await update.message.reply_text(f"❌ Xatolik: {res.get('msg', 'Noma’lum xato')}")
     except Exception as e:
-        await update.message.reply_text(f"Xatolik: {str(e)}\nYordam uchun /help")
+        await update.message.reply_text(f"⚠️ Xatolik: {str(e)}")
 
-# Asosiy funksiya
-def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+# /sell
+async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        symbol = context.args[0].upper()
+        size = context.args[1]
+        if "USD" not in symbol and "USDT" not in symbol:
+            symbol += "USDT"
+        
+        order_data = {
+            "symbol": symbol,
+            "side": "sell",
+            "orderType": "market",
+            "size": size
+        }
+        res = bitget_request("POST", "/api/spot/v1/trade/orders", body=order_data)
+        if res.get("code") == "00000":
+            await update.message.reply_text(f"✅ Sotish bajarildi!\nSymbol: {symbol}\nMiqdor: {size}")
+        else:
+            await update.message.reply_text(f"❌ Xatolik: {res.get('msg', 'Noma’lum xato')}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Xatolik: {str(e)}")
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("Bot ishga tushdi...")
-    application.run_polling()
-
+# Asosiy
 if __name__ == "__main__":
-    main()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("buy", buy))
+    app.add_handler(CommandHandler("sell", sell))
+    print("Bot ishga tushdi...")
+    app.run_polling()
