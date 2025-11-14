@@ -1,288 +1,196 @@
 import os
 import json
 import logging
-from datetime import datetime
+import requests
 from dotenv import load_dotenv
-from telegram import (
-    Update, ReplyKeyboardMarkup, InlineKeyboardMarkup,
-    InlineKeyboardButton, KeyboardButton, ReplyKeyboardRemove
-)
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    ContextTypes, CallbackQueryHandler, filters
-)
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
 
 # === Sozlamalar ===
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
-ADMIN_CHAT_ID = AUTHORIZED_USER_ID  # Admin — siz
+ADMIN_CHAT_ID = AUTHORIZED_USER_ID
 
-# Foydalanuvchi ma'lumotlarini saqlash (real loyihada — DB kerak!)
-user_data = {}
-orders = {}
-currencies = ["BTC", "ETH", "USDT"]
-bank_cards = {
-    "BTC": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
-    "USDT": "TJq9cFh9QvKJz1G8y6xQ5W8a7b9c0d1e2f"
+# Admin sozlamalari (haqiqiy loyihada DB kerak)
+settings = {
+    "markup_percent": 3.0,  # 3% foyda
+    "currencies": ["BTC", "ETH", "USDT"]
 }
 
+# Bitget API
+BASE_URL = "https://api.bitget.com"
+
+def get_bitget_price(symbol: str) -> dict:
+    """Bitgetdan sotib olish/sotish narxlarini olish"""
+    try:
+        url = f"{BASE_URL}/api/spot/v1/market/ticker?symbol={symbol}"
+        res = requests.get(url, timeout=5)
+        data = res.json()
+        if data.get("code") == "00000":
+            ticker = data["data"]
+            return {
+                "buy": float(ticker["ask"]),   # Boshqalar sotayotgan narx (siz sotib olasiz)
+                "sell": float(ticker["bid"])   # Boshqalar sotib olayotgan narx (siz sotasiz)
+            }
+    except Exception as e:
+        logging.error(f"Bitget API xatosi: {e}")
+    return {"buy": 0, "sell": 0}
+
 # === Menyular ===
-MAIN_MENU = [["💰 Sotib olish", "💳 Sotish"], ["📋 Buyurtmalar", "📊 Valyuta kurslari"]]
-ADMIN_MENU = [["➕ Valyuta qo'shish", "➖ Valyuta o'chirish"], ["💳 Karta sozlash", "📤 Xabar yuborish"], ["📋 Buyurtmalar"]]
+MAIN_MENU = [["💰 Sotib olish", "💳 Sotish"], ["📊 Kurslar"]]
+ADMIN_MENU = [["⚙️ Foiz sozlash", "📢 Xabar yuborish"]]
 
-# === Yordamchi funksiyalar ===
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_CHAT_ID
-
-def save_order(user_id: int, order_type: str, data: dict):
-    order_id = f"ORD{len(orders)+1:04}"
-    orders[order_id] = {
-        "user_id": user_id,
-        "type": order_type,
-        "data": data,
-        "status": "pending",
-        "timestamp": datetime.now().isoformat()
-    }
-    return order_id
-
-def get_user_name(update: Update) -> str:
-    user = update.effective_user
-    return user.full_name or user.username or f"User{user.id}"
-
-# === Asosiy menyu ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if is_admin(user_id):
-        text = "👨‍💻 Admin panel\nFoydalanuvchi menyusi uchun /user"
-    else:
-        text = "💱 Obmen botiga xush kelibsiz!"
+    menu = ADMIN_MENU if user_id == ADMIN_CHAT_ID else MAIN_MENU
     await update.message.reply_text(
-        text,
-        reply_markup=ReplyKeyboardMarkup(ADMIN_MENU if is_admin(user_id) else MAIN_MENU, resize_keyboard=True)
+        "💱 Obmen botiga xush kelibsiz!" if user_id != ADMIN_CHAT_ID else "👨‍💻 Admin panel",
+        reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True)
     )
 
-async def user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_admin(update.effective_user.id):
-        await update.message.reply_text(
-            "Foydalanuvchi menyusi:",
-            reply_markup=ReplyKeyboardMarkup(MAIN_MENU, resize_keyboard=True)
-        )
-
-# === Valyuta kurslari (Bitget API orqali) ===
+# === Kurslarni ko'rsatish ===
 async def show_rates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "📈 Joriy kurslar (taxminan):\n\n"
-    for cur in currencies:
+    msg = "📈 Joriy kurslar (Bitget):\n\n"
+    for cur in settings["currencies"]:
         if cur == "USDT":
-            msg += f"USDT/USDT: 1.00 🔁\n"
+            msg += "USDT/USDT: 1.00\n"
         else:
-            # Haqiqiy API chaqiruvi kerak, lekin hozircha statik
-            buy = 60000 + (1000 if cur == "BTC" else 3000)
-            sell = buy * 0.995
-            msg += f"{cur}/USDT:\n  Sotib olish: ${buy:,.0f}\n  Sotish: ${sell:,.0f}\n\n"
+            price = get_bitget_price(f"{cur}USDT")
+            markup = settings["markup_percent"]
+            buy_with_markup = price["buy"] * (1 + markup / 100)
+            sell_with_markup = price["sell"] * (1 - markup / 100)
+            msg += f"{cur}/USDT:\n"
+            msg += f"  Sotib olish: ${buy_with_markup:,.2f}\n"
+            msg += f"  Sotish: ${sell_with_markup:,.2f}\n\n"
     await update.message.reply_text(msg)
 
 # === Sotib olish ===
 async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Qaysi valyutani sotib olmoqchisiz?",
-        reply_markup=ReplyKeyboardMarkup([[cur] for cur in currencies], resize_keyboard=True)
-    )
-    return
+    await update.message.reply_text("Valyuta nomini kiriting (masalan: BTC):")
 
-# === Sotish ===
 async def sell_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Qaysi valyutani sotmoqchisiz?",
-        reply_markup=ReplyKeyboardMarkup([[cur] for cur in currencies], resize_keyboard=True)
-    )
+    await update.message.reply_text("Valyuta nomini kiriting (masalan: BTC):")
 
-# === Buyurtmalar ===
-async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === Valyuta kiritish ===
+async def handle_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().upper()
     user_id = update.effective_user.id
-    user_orders = [v for k, v in orders.items() if v["user_id"] == user_id]
-    if not user_orders:
-        await update.message.reply_text("Sizda hali buyurtma yo'q.")
-        return
-    msg = "📋 Sizning buyurtmalaringiz:\n\n"
-    for ord in user_orders:
-        msg += f"🆔 {ord['data'].get('order_id', 'Noma’lum')}\n"
-        msg += f"📤 {ord['type']} | {ord['data'].get('currency', '?')} {ord['data'].get('amount', '?')}\n"
-        msg += f"📊 {ord['status']}\n\n"
-    await update.message.reply_text(msg)
 
-# === Xabar boshqaruvi ===
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
-    user_name = get_user_name(update)
-
-    # Admin panel
-    if is_admin(user_id):
-        if text == "➕ Valyuta qo'shish":
-            await update.message.reply_text("Yangi valyuta nomini yuboring (masalan: LTC):")
-            context.user_data["action"] = "add_currency"
-        elif text == "➖ Valyuta o'chirish":
-            await update.message.reply_text("O'chirish uchun valyutani tanlang:", reply_markup=ReplyKeyboardMarkup([[cur] for cur in currencies], resize_keyboard=True))
-            context.user_data["action"] = "remove_currency"
-        elif text == "💳 Karta sozlash":
-            await update.message.reply_text("Valyutani tanlang:", reply_markup=ReplyKeyboardMarkup([[cur] for cur in currencies], resize_keyboard=True))
-            context.user_data["action"] = "set_card"
-        elif text == "📤 Xabar yuborish":
-            await update.message.reply_text("Barcha foydalanuvchilarga yuborish uchun xabarni yozing:")
-            context.user_data["action"] = "broadcast"
-        elif text == "📋 Buyurtmalar":
-            if not orders:
-                await update.message.reply_text("Buyurtma yo'q.")
-            else:
-                for oid, ord in orders.items():
-                    if ord["status"] == "pending":
-                        user = await context.bot.get_chat(ord["user_id"])
-                        btns = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"confirm_{oid}"),
-                             InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel_{oid}")]
-                        ])
-                        await update.message.reply_text(
-                            f"🆔 {oid}\n"
-                            f"👤 {user.full_name or user.username} (ID: {ord['user_id']})\n"
-                            f"📥 {ord['type']} → {ord['data'].get('currency', '?')} {ord['data'].get('amount', '?')}\n"
-                            f"📄 Chek: {ord['data'].get('receipt', 'Yuborilmagan')}",
-                            reply_markup=btns
-                        )
-        elif context.user_data.get("action") == "add_currency":
-            currencies.append(text.upper())
-            del context.user_data["action"]
-            await update.message.reply_text(f"{text.upper()} qo'shildi!", reply_markup=ReplyKeyboardMarkup(ADMIN_MENU, resize_keyboard=True))
-        elif context.user_data.get("action") == "remove_currency":
-            if text in currencies:
-                currencies.remove(text)
-                await update.message.reply_text(f"{text} o'chirildi!", reply_markup=ReplyKeyboardMarkup(ADMIN_MENU, resize_keyboard=True))
-            del context.user_data["action"]
-        elif context.user_data.get("action") == "set_card":
-            context.user_data["card_currency"] = text
-            await update.message.reply_text(f"{text} uchun karta raqamini yuboring:")
-            context.user_data["action"] = "set_card_number"
-        elif context.user_data.get("action") == "set_card_number":
-            bank_cards[context.user_data["card_currency"]] = text
-            del context.user_data["action"]
-            del context.user_data["card_currency"]
-            await update.message.reply_text("Karta saqlandi!", reply_markup=ReplyKeyboardMarkup(ADMIN_MENU, resize_keyboard=True))
-        elif context.user_data.get("action") == "broadcast":
-            for oid in orders:
-                try:
-                    await context.bot.send_message(chat_id=orders[oid]["user_id"], text=f"📢 Admin xabari:\n\n{text}")
-                except:
-                    pass
-            del context.user_data["action"]
-            await update.message.reply_text("Xabar yuborildi!", reply_markup=ReplyKeyboardMarkup(ADMIN_MENU, resize_keyboard=True))
+    if text not in settings["currencies"]:
+        await update.message.reply_text("❌ Noto'g'ri valyuta. Mavjud: " + ", ".join(settings["currencies"]))
         return
 
-    # Oddiy foydalanuvchi
-    if text in currencies:
-        context.user_data["currency"] = text
-        await update.message.reply_text("Miqdorni yuboring:")
-        return
+    # Qaysi rejimda ekanligini saqlash
+    if context.user_data.get("mode") == "buy":
+        price_data = get_bitget_price(f"{text}USDT")
+        if price_data["buy"] == 0:
+            await update.message.reply_text("❌ Narxni olishda xatolik.")
+            return
+        buy_price = price_data["buy"] * (1 + settings["markup_percent"] / 100)
+        context.user_data.update({"currency": text, "price": buy_price, "type": "buy"})
+        await update.message.reply_text(f"1 {text} = ${buy_price:,.2f} USDT\n\nMiqdorni kiriting (USDT yoki {text}):")
+    elif context.user_data.get("mode") == "sell":
+        price_data = get_bitget_price(f"{text}USDT")
+        if price_data["sell"] == 0:
+            await update.message.reply_text("❌ Narxni olishda xatolik.")
+            return
+        sell_price = price_data["sell"] * (1 - settings["markup_percent"] / 100)
+        context.user_data.update({"currency": text, "price": sell_price, "type": "sell"})
+        await update.message.reply_text(f"1 {text} = ${sell_price:,.2f} USDT\n\nMiqdorni kiriting ({text}):")
+    else:
+        await update.message.reply_text("Iltimos, avval sotib olish yoki sotishni tanlang.")
 
-    if "currency" in context.user_data and "amount" not in context.user_data:
-        context.user_data["amount"] = text
+# === Miqdor kiritish ===
+async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text)
         cur = context.user_data["currency"]
-        if context.user_data.get("mode") == "sell":
-            await update.message.reply_text(f"{cur} hamyon manzilingizni yuboring:")
+        price = context.user_data["price"]
+        order_type = context.user_data["type"]
+
+        if order_type == "buy":
+            # Foydalanuvchi USDT miqdorini kiritadi yoki BTC
+            # Oddiy: BTC miqdori kiritilsin
+            btc_amount = amount
+            usdt_total = btc_amount * price
+            await update.message.reply_text(
+                f"✅ Sotib olish:\n{btc_amount} {cur} = {usdt_total:,.2f} USDT\n\n"
+                f"To'lov qilish uchun USDT hamyoningizni yuboring:"
+            )
+            context.user_data["final_amount"] = btc_amount
             context.user_data["step"] = "wallet"
         else:
-            card = bank_cards.get(cur, "Karta yo'q")
+            # Sotish: BTC miqdori kiritiladi
+            btc_amount = amount
+            usdt_total = btc_amount * price
             await update.message.reply_text(
-                f"💳 To'lov karta:\n<code>{card}</code>\n\n"
-                f"Chek sifatida to'lov tasdiqlash rasmini yuboring:",
-                parse_mode="HTML"
+                f"✅ Sotish:\n{btc_amount} {cur} = {usdt_total:,.2f} USDT\n\n"
+                f"USDT hamyoningizni yuboring:"
             )
-            context.user_data["step"] = "receipt"
-        return
+            context.user_data["final_amount"] = btc_amount
+            context.user_data["step"] = "wallet"
+    except ValueError:
+        await update.message.reply_text("❌ Noto'g'ri miqdor. Raqam kiriting.")
 
-    if context.user_data.get("step") == "wallet":
-        context.user_data["wallet"] = text
-        await update.message.reply_text("Karta raqamingizni yuboring:")
-        context.user_data["step"] = "card"
-        return
+# === Hamyon manzili ===
+async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    wallet = update.message.text
+    cur = context.user_data["currency"]
+    amount = context.user_data["final_amount"]
+    order_type = context.user_data["type"]
 
-    if context.user_data.get("step") == "card":
-        context.user_data["user_card"] = text
-        await update.message.reply_text("Chek sifatida to'lov tasdiqlash rasmini yuboring:")
-        context.user_data["step"] = "receipt"
-        return
+    # Admin uchun xabar
+    user = update.effective_user
+    admin_text = (
+        f"🆕 Yangi buyurtma!\n"
+        f"👤 {user.full_name} (ID: {user.id})\n"
+        f"📥 {order_type.upper()} {amount} {cur}\n"
+        f"👛 Hamyon: {wallet}"
+    )
+    btns = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"confirm_{user.id}_{order_type}_{cur}_{amount}")],
+        [InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel_{user.id}")]
+    ])
+    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text, reply_markup=btns)
+    await update.message.reply_text("✅ Buyurtma yuborildi! Admin tez orada ko'rib chiqadi.")
+    context.user_data.clear()
 
-    if context.user_data.get("step") == "receipt":
-        # Buyurtma saqlash
-        mode = context.user_data.get("mode", "buy")
-        order_id = save_order(
-            user_id,
-            mode,
-            {
-                "currency": context.user_data["currency"],
-                "amount": context.user_data["amount"],
-                "wallet": context.user_data.get("wallet", ""),
-                "user_card": context.user_data.get("user_card", ""),
-                "receipt": "Rasm yoki matn yuborildi"
-            }
-        )
-        context.user_data["order_id"] = order_id
+# === Admin sozlamalari ===
+async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Foizni kiriting (masalan: 3.5):")
+    context.user_data["admin_action"] = "set_markup"
 
-        # Admin uchun xabar
-        receipt_info = "Rasm yoki matn yuborildi"
-        admin_text = (
-            f"🆕 Yangi buyurtma!\n"
-            f"🆔 {order_id}\n"
-            f"👤 {user_name} (ID: {user_id})\n"
-            f"📱 Telefon: {update.effective_user.id}\n"
-            f"📥 {mode.capitalize()} → {context.user_data['currency']} {context.user_data['amount']}\n"
-            f"📄 Chek: {receipt_info}"
-        )
-
-        # Adminga tugmalar bilan yuborish
-        btns = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"confirm_{order_id}"),
-             InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel_{order_id}")]
-        ])
-
+async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("admin_action") == "set_markup":
         try:
-            if update.message.photo:
-                photo = update.message.photo[-1].file_id
-                await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo, caption=admin_text, reply_markup=btns)
-            else:
-                await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text, reply_markup=btns)
-        except Exception as e:
-            logging.error(f"Admin xabar xatosi: {e}")
+            percent = float(update.message.text)
+            settings["markup_percent"] = percent
+            await update.message.reply_text(f"✅ Foiz {percent}% ga sozlandi!", reply_markup=ReplyKeyboardMarkup(ADMIN_MENU, resize_keyboard=True))
+        except:
+            await update.message.reply_text("❌ Noto'g'ri qiymat.")
+        del context.user_data["admin_action"]
 
-        await update.message.reply_text("✅ Buyurtmangiz qabul qilindi! Admin tez orada ko'rib chiqadi.", reply_markup=ReplyKeyboardMarkup(MAIN_MENU, resize_keyboard=True))
-        context.user_data.clear()
-
+# === Tasdiqlash/Bekor qilish ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    action, order_id = query.data.split("_", 1)
+    data = query.data
 
-    if order_id not in orders:
-        await query.edit_message_text("❌ Buyurtma topilmadi.")
-        return
+    if data.startswith("confirm_"):
+        parts = data.split("_")
+        user_id = int(parts[1])
+        order_type = parts[2]
+        cur = parts[3]
+        amount = parts[4]
+        await context.bot.send_message(chat_id=user_id, text=f"✅ Sizning {amount} {cur} {order_type} buyurtmangiz bajarildi!")
+        await query.edit_message_text("✅ Buyurtma bajarildi.")
+    elif data.startswith("cancel_"):
+        user_id = int(data.split("_")[1])
+        await context.bot.send_message(chat_id=user_id, text="❌ Buyurtma bekor qilindi.")
+        await query.edit_message_text("❌ Bekor qilindi.")
 
-    order = orders[order_id]
-    user_id = order["user_id"]
-
-    if action == "confirm":
-        orders[order_id]["status"] = "confirmed"
-        cur = order["data"]["currency"]
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"✅ Sizning buyurtmangiz tasdiqlandi!\n\nSizga {cur} o'tkazildi."
-        )
-        await query.edit_message_text(f"✅ {order_id} tasdiqlandi.")
-
-    elif action == "cancel":
-        orders[order_id]["status"] = "cancelled"
-        await context.bot.send_message(chat_id=user_id, text="❌ Buyurtmangiz bekor qilindi.")
-        await query.edit_message_text(f"❌ {order_id} bekor qilindi.")
-
-# === Asosiy ishga tushirish ===
+# === Asosiy qism ===
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     if not TELEGRAM_TOKEN:
@@ -291,13 +199,19 @@ if __name__ == "__main__":
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("user", user_menu))
-    app.add_handler(MessageHandler(filters.Regex("^💰 Sotib olish$"), lambda u, c: setattr(c.user_data, 'mode', 'buy') or buy_handler(u, c)))
-    app.add_handler(MessageHandler(filters.Regex("^💳 Sotish$"), lambda u, c: setattr(c.user_data, 'mode', 'sell') or sell_handler(u, c)))
-    app.add_handler(MessageHandler(filters.Regex("^📋 Buyurtmalar$"), show_orders))
-    app.add_handler(MessageHandler(filters.Regex("^📊 Valyuta kurslari$"), show_rates))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
+    app.add_handler(MessageHandler(filters.Regex("^💰 Sotib olish$"), lambda u, c: c.user_data.update({"mode": "buy"}) or buy_handler(u, c)))
+    app.add_handler(MessageHandler(filters.Regex("^💳 Sotish$"), lambda u, c: c.user_data.update({"mode": "sell"}) or sell_handler(u, c)))
+    app.add_handler(MessageHandler(filters.Regex("^📊 Kurslar$"), show_rates))
+    app.add_handler(MessageHandler(filters.Regex("^⚙️ Foiz sozlash$"), admin_settings))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Chat(chat_id=ADMIN_CHAT_ID), handle_admin_message))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.Chat(chat_id=ADMIN_CHAT_ID)), handle_currency))
     app.add_handler(CallbackQueryHandler(button_handler))
+
+    # Miqdor va hamyon uchun alohida handler
+    app.add_handler(MessageHandler(
+        filters.TEXT & (~filters.Regex("^💰|^💳|^📊|^⚙️")) & (~filters.Chat(chat_id=ADMIN_CHAT_ID)),
+        handle_amount if "step" not in {} else handle_wallet  # Soddalashtirish uchun, realda state kerak
+    ))
 
     print("🚀 Obmen bot ishga tushdi...")
     app.run_polling()
